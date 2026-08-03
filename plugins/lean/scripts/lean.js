@@ -25,9 +25,11 @@ const MODE = process.argv[2] || 'prompt';
 
 const DEFAULTS = {
   enabled: true,
-  // 컨텍스트 한도. 회사 정책이 1M이므로 기본값이 1000000이다.
-  // 200k 컨텍스트를 쓰는 환경은 200000으로 덮어쓴다.
-  contextLimit: 1000000,
+  // 컨텍스트 한도. "auto"면 관측값으로 판별한다 — 컨텍스트가 200k를 넘은 적이
+  // 있으면 1M 창이 켜져 있다는 뜻이므로 1000000, 아니면 200000.
+  // 환경마다 다를 때(개인은 200k, 회사는 1M) 설정을 나누지 않아도 된다.
+  // 숫자를 직접 넣으면 그 값이 그대로 쓰인다.
+  contextLimit: 'auto',
   // 컨텍스트 점유율 임계치
   ctxWarn: 0.55,
   ctxHigh: 0.75,
@@ -297,6 +299,57 @@ function signals(m, cfg) {
   return out;
 }
 
+/* ---------------------------------------------------- context limit (auto) */
+
+const STD_LIMIT = 200000;
+const BIG_LIMIT = 1000000;
+
+function limitFile() {
+  const dir = path.join(os.homedir(), '.claude', 'lean-state');
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (_) {
+    /* ignore */
+  }
+  return path.join(dir, 'context-limit.json');
+}
+
+/**
+ * 컨텍스트 한도를 정한다.
+ *
+ * 설정에 숫자가 있으면 그대로. "auto"면:
+ *   1) 이번 세션에서 200k를 넘긴 적이 있으면 → 1M 창이 켜져 있다는 확정적 증거
+ *   2) 아니면 이전에 감지해 둔 값 (세션 초반엔 아직 작아서 판별이 안 되므로 기억한다)
+ *   3) 둘 다 없으면 200k
+ *
+ * 1)이 성립하면 기억해 둔다. 환경이 바뀌면 lean-state/context-limit.json을 지우면 된다.
+ */
+function resolveContextLimit(cfg, m) {
+  if (typeof cfg.contextLimit === 'number') return cfg.contextLimit;
+
+  const peak = m && m.ctxSeries && m.ctxSeries.length ? Math.max(...m.ctxSeries) : 0;
+  if (peak > STD_LIMIT) {
+    try {
+      fs.writeFileSync(
+        limitFile(),
+        JSON.stringify({ limit: BIG_LIMIT, detectedAt: new Date().toISOString(), peak }),
+        'utf8'
+      );
+    } catch (_) {
+      /* 기억에 실패해도 판별 자체는 유효하다 */
+    }
+    return BIG_LIMIT;
+  }
+
+  try {
+    const saved = JSON.parse(fs.readFileSync(limitFile(), 'utf8'));
+    if (typeof saved.limit === 'number') return saved.limit;
+  } catch (_) {
+    /* 기록 없음 */
+  }
+  return STD_LIMIT;
+}
+
 /* ------------------------------------------------------------------- state */
 
 function stateFile(sessionId) {
@@ -394,6 +447,7 @@ function main() {
     }
     const { lines, partial } = readTranscriptLines(file);
     const m = analyze(lines);
+    cfg.contextLimit = resolveContextLimit(cfg, m);
     const sig = signals(m, cfg);
     const ratio = m.ctx / cfg.contextLimit;
     console.log('=== lean report ===');
@@ -442,7 +496,8 @@ function main() {
         const { lines } = readTranscriptLines(transcript);
         const m = analyze(lines);
         if (m.turns > 0) {
-          extra += `\n\n(이어받은 세션: 컨텍스트 ${k(m.ctx)} / ${pct(m.ctx / cfg.contextLimit)})`;
+          const limit = resolveContextLimit(cfg, m);
+          extra += `\n\n(이어받은 세션: 컨텍스트 ${k(m.ctx)} / ${k(limit)} ${pct(m.ctx / limit)})`;
         }
       }
     } catch (_) {
@@ -464,6 +519,7 @@ function main() {
   }
   if (m.turns < 2) return;
 
+  cfg.contextLimit = resolveContextLimit(cfg, m);
   const sig = signals(m, cfg);
   if (!sig.length) return;
 
@@ -492,6 +548,9 @@ module.exports = {
   loadConfig,
   analyze,
   signals,
+  resolveContextLimit,
+  STD_LIMIT,
+  BIG_LIMIT,
   readTranscriptLines,
   findLatestTranscript,
   projectSlug,

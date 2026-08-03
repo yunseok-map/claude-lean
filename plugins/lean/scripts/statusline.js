@@ -168,12 +168,15 @@ function main() {
   const modelId = (input.model && input.model.id) || m.model;
   const price = priceFor(modelId, m.speed);
   const save = cacheSavings(m, price);
+  // 설정이 "auto"면 관측값으로 판별한다 — 개인 환경(200k)과 회사 환경(1M)에
+  // 같은 설정을 써도 각자 맞게 잡힌다.
+  cfg.contextLimit = lean.resolveContextLimit(cfg, m);
   const ratio = m.ctx / cfg.contextLimit;
 
   const chips = [];
 
-  // 1M 컨텍스트를 쓰는 중이라는 표시 — 회사 정책이 1M이면 상시 켜진다
-  if (cfg.contextLimit >= 1e6) chips.push(c('red', '⚠ 1M ON'));
+  // 1M 창이 실제로 켜져 있을 때만 표시한다
+  if (cfg.contextLimit >= lean.BIG_LIMIT) chips.push(c('red', '⚠ 1M ON'));
 
   // 모델
   let name = `🤖 ${display || modelId || 'Claude'}`;
@@ -201,10 +204,17 @@ function main() {
       )
     );
 
-    // 캐시 절감액 / 절감 토큰
+    // 캐시 수지. 아직 읽기가 없으면 쓰기 프리미엄만 나가서 음수가 된다 —
+    // 그걸 "saved"로 부르면 거짓말이므로 라벨을 나눈다.
     if (save) {
-      chips.push(`${c('cyan', '💰 Cache saved')} ${money(save.usd)}`);
-      chips.push(`${c('cyan', '🎫 Tokens saved')} ${k(save.tokens)}`);
+      if (save.usd < 0) {
+        chips.push(`${c('yellow', '💰 Cache cost')} ${money(-save.usd)}`);
+      } else {
+        chips.push(`${c('cyan', '💰 Cache saved')} ${money(save.usd)}`);
+      }
+      if (save.tokens >= 1000) {
+        chips.push(`${c('cyan', '🎫 Tokens saved')} ${k(save.tokens)}`);
+      }
     }
 
     // lean 신호가 잡혔으면 키만 짧게

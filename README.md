@@ -120,7 +120,7 @@ Opus 5 │ 🧠 96% │ ▮▮▯▯▯ ctx 427k/1M 43% │ 💰 $38.8 │ 🎫 
 
 ```json
 {
-  "contextLimit": 1000000,
+  "contextLimit": "auto",
   "ctxWarn": 0.55,
   "ctxHigh": 0.75,
   "ctxCostFloor": 250000,
@@ -136,7 +136,11 @@ Opus 5 │ 🧠 96% │ ▮▮▯▯▯ ctx 427k/1M 43% │ 💰 $38.8 │ 🎫 
 }
 ```
 
-- 200k 컨텍스트 환경이면 `contextLimit`을 `200000`으로.
+- `contextLimit`은 기본 `"auto"` — 컨텍스트가 200k를 넘은 적이 있으면 1M 창이 켜져 있다는
+  확정적 증거이므로 1M으로 잡고, 그 사실을 `~/.claude/lean-state/context-limit.json`에 기억한다.
+  세션 초반엔 아직 작아서 판별이 안 되므로 기억이 필요하다. **개인 환경(200k)과 회사 환경(1M)에
+  같은 설정 파일을 써도 각자 맞게 잡힌다.** 환경이 바뀌면 그 파일을 지우면 재판별한다.
+  강제로 고정하려면 숫자를 직접 넣는다(`200000` / `1000000`).
 - 옵시디언 연동만 끄려면 `obsidian: false`. 볼트 자동 탐지가 틀리면 `vaultPath`로 지정.
 - 카드 주입이 거슬리면 `sessionCard: false` (신호 훅은 계속 동작).
 - 전부 끄려면 `enabled: false`.
