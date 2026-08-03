@@ -1,0 +1,28 @@
+{
+  "name": "lean",
+  "owner": {
+    "name": "yunseok-map"
+  },
+  "metadata": {
+    "description": "적은 토큰으로 빠르고 똑똑하게 일하게 만드는 Claude Code 플러그인 모음",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "lean",
+      "source": "./plugins/lean",
+      "description": "세션 상태를 읽어 상황에 맞는 작업 방식을 스스로 조절하게 만드는 토큰 효율 플러그인. 차단 없이 신호만 준다.",
+      "version": "0.1.0",
+      "author": {
+        "name": "yunseok-map"
+      },
+      "keywords": [
+        "token",
+        "context",
+        "efficiency",
+        "cache",
+        "cost"
+      ]
+    }
+  ]
+}
