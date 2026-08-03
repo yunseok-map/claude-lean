@@ -142,20 +142,51 @@ function readTranscriptLines(file, maxBytes = 12 * 1024 * 1024) {
  */
 function analyze(lines) {
   const main = new Map(); // requestId -> usage
-  const side = new Map();
+  const side = new Map(); // 전경 서브에이전트: isSidechain 엔트리
+  const bg = new Map(); // 백그라운드 서브에이전트: taskId -> {tokens, toolUses, ms}
   let effort = null;
   let model = null;
   let speed = null;
   let lastTs = 0;
 
   for (const line of lines) {
-    if (!line || line.indexOf('"usage"') === -1) continue;
+    if (!line) continue;
+    const hasUsage = line.indexOf('"usage"') !== -1;
+    const hasBg = line.indexOf('subagent_tokens') !== -1;
+    if (!hasUsage && !hasBg) continue;
     let o;
     try {
       o = JSON.parse(line);
     } catch (_) {
       continue;
     }
+
+    // 백그라운드 서브에이전트는 부모 트랜스크립트에 isSidechain 엔트리를 남기지
+    // 않는다. 사용량은 작업 완료 알림 텍스트에만 있다.
+    // 같은 알림이 queue-operation과 user로 두 번 기록되고, 이 대화 자체가
+    // 같은 문자열을 인용할 수도 있으므로 반드시 task-id로 중복을 제거한다.
+    if (hasBg) {
+      let txt = '';
+      try {
+        const c = (o.message && o.message.content) || o.content || '';
+        txt = typeof c === 'string' ? c : JSON.stringify(c);
+      } catch (_) {
+        txt = '';
+      }
+      const id = /<task-id>([^<]+)<\/task-id>/.exec(txt);
+      const tok = /<subagent_tokens>(\d+)<\/subagent_tokens>/.exec(txt);
+      if (id && tok && !bg.has(id[1])) {
+        const tu = /<tool_uses>(\d+)<\/tool_uses>/.exec(txt);
+        const ms = /<duration_ms>(\d+)<\/duration_ms>/.exec(txt);
+        bg.set(id[1], {
+          tokens: Number(tok[1]),
+          toolUses: tu ? Number(tu[1]) : 0,
+          ms: ms ? Number(ms[1]) : 0,
+        });
+      }
+    }
+
+    if (!hasUsage) continue;
     if (!o || o.type !== 'assistant' || !o.message || !o.message.usage) continue;
     const u = o.message.usage;
     if (typeof u.output_tokens !== 'number') continue;
@@ -214,6 +245,20 @@ function analyze(lines) {
       (u.cache_creation_input_tokens || 0) +
       (u.output_tokens || 0);
   }
+
+  // 백그라운드 서브에이전트를 합산한다. 이게 빠지면 위임 비중 신호가
+  // 가장 흔한 사용 형태(백그라운드 실행)에서 0으로 보고된다.
+  m.bgCalls = bg.size;
+  m.bgTokens = 0;
+  m.bgToolUses = 0;
+  m.bgMs = 0;
+  for (const b of bg.values()) {
+    m.bgTokens += b.tokens;
+    m.bgToolUses += b.toolUses;
+    m.bgMs += b.ms;
+  }
+  m.sideTokens += m.bgTokens;
+  m.sideTurns += m.bgCalls;
 
   m.cacheHit =
     m.cacheRead + m.cacheCreate > 0 ? m.cacheRead / (m.cacheRead + m.cacheCreate) : 1;
@@ -459,7 +504,12 @@ function main() {
       `누적 출력        : ${k(m.out)}  (턴당 ${Math.round(m.avgOut)}, effort=${m.effort || '?'}, 기준 ${Math.round(cfg.outputHeavy * (EFFORT_SCALE[m.effort] || 1))})`
     );
     console.log(`턴당 컨텍스트 증가: ${k(m.growth)}`);
-    console.log(`서브에이전트     : ${m.sideTurns}콜, ${k(m.sideTokens)} 토큰`);
+    console.log(
+      `서브에이전트     : ${m.sideTurns}콜, ${k(m.sideTokens)} 토큰` +
+        (m.bgCalls
+          ? ` (백그라운드 ${m.bgCalls}콜 ${k(m.bgTokens)}t / 툴 ${m.bgToolUses}회 / ${(m.bgMs / 1000).toFixed(0)}초)`
+          : '')
+    );
     console.log('--- 신호 ---');
     if (!sig.length) console.log('없음 — 현재 페이스 양호.');
     else for (const [key, msg] of sig) console.log(`[${key}] ${msg}`);
