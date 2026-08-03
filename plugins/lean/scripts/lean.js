@@ -25,11 +25,15 @@ const MODE = process.argv[2] || 'prompt';
 
 const DEFAULTS = {
   enabled: true,
-  // 컨텍스트 한도. 1M 컨텍스트를 쓰는 팀은 1000000으로 덮어쓰면 된다.
-  contextLimit: 200000,
+  // 컨텍스트 한도. 회사 정책이 1M이므로 기본값이 1000000이다.
+  // 200k 컨텍스트를 쓰는 환경은 200000으로 덮어쓴다.
+  contextLimit: 1000000,
   // 컨텍스트 점유율 임계치
   ctxWarn: 0.55,
   ctxHigh: 0.75,
+  // 점유율과 별개로, 이 크기를 넘으면 캐시 적중이어도 턴당 비용이 붙는다.
+  // 1M 창에서는 55%(550k)까지 기다리면 이미 많이 쓴 뒤이므로 절대 기준이 필요하다.
+  ctxCostFloor: 250000,
   // 캐시 적중률이 이 아래로 떨어지면 컨텍스트가 흔들리고 있다는 뜻
   cacheHitFloor: 0.55,
   // 턴당 평균 출력 토큰 (effort에 따라 자동 보정된다 — EFFORT_SCALE 참고)
@@ -42,6 +46,10 @@ const DEFAULTS = {
   minTurnsBetweenNudges: 3,
   // 세션 시작 시 작업 원칙 카드를 주입할지
   sessionCard: true,
+  // Obsidian 볼트를 제2 저장소로 쓸지. 볼트가 없으면 자동으로 무시된다.
+  obsidian: true,
+  // 볼트 자동 탐지가 틀릴 때 경로를 직접 지정
+  vaultPath: null,
 };
 
 function loadConfig() {
@@ -134,6 +142,9 @@ function analyze(lines) {
   const main = new Map(); // requestId -> usage
   const side = new Map();
   let effort = null;
+  let model = null;
+  let speed = null;
+  let lastTs = 0;
 
   for (const line of lines) {
     if (!line || line.indexOf('"usage"') === -1) continue;
@@ -149,6 +160,13 @@ function analyze(lines) {
     const key = o.requestId || o.uuid;
     if (!key) continue;
     if (o.effort) effort = o.effort;
+    if (o.message.model) model = o.message.model;
+    if (u.speed) speed = u.speed;
+    if (!o.isSidechain && o.timestamp) {
+      // 마지막 캐시 쓰기 시각 — 만료 카운트다운의 기준
+      const t = Date.parse(o.timestamp);
+      if (!isNaN(t) && t > lastTs) lastTs = t;
+    }
     (o.isSidechain ? side : main).set(key, u);
   }
 
@@ -165,6 +183,9 @@ function analyze(lines) {
     ephemeral5m: 0,
     ephemeral1h: 0,
     effort: effort,
+    model: model,
+    speed: speed,
+    lastTs: lastTs,
   };
 
   for (const u of main.values()) {
@@ -230,6 +251,14 @@ function signals(m, cfg) {
     out.push([
       'ctx-warn',
       `컨텍스트 ${pct(ratio)}. 새 자료는 요약해서 들이고, 이미 읽은 파일은 다시 읽지 마라.`,
+    ]);
+  }
+
+  // 1M 창에서는 점유율이 낮아도 절대 크기가 곧 턴당 비용이다.
+  if (m.ctx >= cfg.ctxCostFloor && ratio < cfg.ctxWarn) {
+    out.push([
+      'ctx-cost',
+      `컨텍스트 ${k(m.ctx)}. 창은 여유롭지만 이 크기가 매 턴 다시 계산된다 — 새 파일을 통째로 들이지 말고 필요한 구간만.`,
     ]);
   }
 
@@ -311,14 +340,42 @@ function emit(eventName, text) {
 }
 
 const CARD = [
-  '[lean] 이 세션의 작업 방식 — 적은 토큰으로 빠르게.',
+  '[lean] 이 세션의 작업 방식 — 1인 IT팀처럼, 적은 토큰으로 빠르게.',
+  '',
+  '## 역할 게이트',
+  '기획·PM·개발·데브옵스를 순서대로 통과한다. 단, 역할은 별도 에이전트가 아니라 체크포인트다.',
+  '역할별로 서술하지 말고, 정해진 형식의 짧은 산출물만 낸다. 역할 전환 자체를 보고하지 않는다.',
+  '- 기획: 진짜 요구와 완료 기준. 1~3줄.',
+  '- PM: 순서와 중단 조건. 항목 3~6개. 여러 단계면 TaskCreate로 남긴다.',
+  '- 개발: 최소 변경으로 구현.',
+  '- 데브옵스: 실제로 실행한 검증 명령과 그 결과. 안 돌렸으면 안 돌렸다고 쓴다.',
+  '',
+  '작업 크기가 어느 역할까지 켤지 정한다 — 작은 일에 전 역할을 켜는 것이 가장 큰 낭비다.',
+  '- XS(파일 1개, 툴콜 1~2회): 개발만. 기획·PM 생략.',
+  '- S(툴콜 2~5회): PM 한 줄 + 개발 + 검증 한 줄.',
+  '- M(파일 여러 개 / 불확실): 네 역할 전부, 각 산출물은 위 형식대로 짧게.',
+  '- L(새 기능·마이그레이션·되돌리기 어려운 변경): 전부 + 착수 전 사용자 확인.',
+  '',
+  '## 위임 라우팅',
+  '판단 기준은 하나: **그 일의 중간 산출물이 내 컨텍스트에 남아야 하는가.**',
+  '남을 필요가 없으면 위임이 이득이다(에이전트가 다 읽고 나는 결론만 받는다). 남아야 하면 직접 한다.',
+  '- scout — 파일 수십 개에서 위치만 찾을 때. 좌표 목록만 돌아온다. (기획/탐색 단계)',
+  '- architect — 여러 파일에 걸친 변경의 순서·위험을 짤 때. 실행 가능한 계획만 돌아온다. (PM 단계)',
+  '- ops — 빌드/테스트/린트를 돌릴 때. 로그 대신 실패 원인 몇 줄만 돌아온다. (데브옵스 단계)',
+  '- Explore — scout로 안 되는 넓고 애매한 탐색. Plan — architect보다 큰 아키텍처 판단.',
+  '- general-purpose — 위 어디에도 안 맞는 다단계 작업.',
+  '위임하지 않는 경우: 툴콜 2~3회로 끝나는 일, 맥락을 길게 설명해야 넘길 수 있는 일(설명 비용 > 절약분),',
+  '코드를 직접 고쳐야 하는 일(개발 단계는 항상 내가 한다 — 위임하면 편집 맥락을 잃는다).',
+  '독립적인 위임은 한 응답에 묶어 병렬로 던진다. 순차로 돌리면 대기 시간이 그대로 누적된다.',
+  '',
+  '## 실행 원칙',
   '- 탐색: Glob으로 후보 좁히고 → Grep(files_with_matches)으로 위치 잡고 → 그 줄만 Read(offset/limit). 통독은 마지막 수단.',
   '- 독립적인 툴 호출은 한 응답에 묶어서 병렬로. 방금 고친 파일은 다시 읽지 않는다.',
   '- 부분 수정은 Write가 아니라 Edit. 셸 grep/cat/find/ls 대신 전용 툴(구조화 출력이 더 싸다).',
   '- 셸 출력이 클 것 같으면 미리 잘라라(head, --limit, 필드 선택).',
-  '- 서브에이전트는 넓게 훑어 결론만 필요할 때만. 내가 2~3콜로 끝낼 일은 직접 한다.',
   '- 답변은 결론부터. 방금 한 일을 다시 요약하지 않는다. 확인 질문은 답에 따라 결과물이 달라질 때만.',
   '- 검증은 가장 좁은 대상으로(전체 스위트 대신 해당 테스트 1개).',
+  '',
   '더 깊은 전술이 필요하면 lean 스킬을 열어라.',
 ].join('\n');
 
@@ -369,12 +426,23 @@ function main() {
   if (MODE === 'session-start') {
     if (!cfg.sessionCard) return;
     let extra = '';
+
+    // Obsidian 볼트가 있으면 좌표를 알려준다. 없으면 조용히 넘어간다.
+    if (cfg.obsidian) {
+      try {
+        const frag = require('./vault').cardFragment(cfg.vaultPath);
+        if (frag) extra += '\n\n' + frag;
+      } catch (_) {
+        /* 볼트 모듈 문제는 세션을 방해하지 않는다 */
+      }
+    }
+
     try {
       if (transcript && fs.existsSync(transcript)) {
         const { lines } = readTranscriptLines(transcript);
         const m = analyze(lines);
         if (m.turns > 0) {
-          extra = `\n(이어받은 세션: 컨텍스트 ${k(m.ctx)} / ${pct(m.ctx / cfg.contextLimit)})`;
+          extra += `\n\n(이어받은 세션: 컨텍스트 ${k(m.ctx)} / ${pct(m.ctx / cfg.contextLimit)})`;
         }
       }
     } catch (_) {
@@ -411,9 +479,23 @@ function main() {
   emit('UserPromptSubmit', `[lean] 지금 세션 상태에서 조정할 것:\n${body}`);
 }
 
-try {
-  main();
-} catch (_) {
-  // 훅은 절대 세션을 방해하면 안 된다. 조용히 종료.
-  process.exit(0);
+if (require.main === module) {
+  try {
+    main();
+  } catch (_) {
+    // 훅은 절대 세션을 방해하면 안 된다. 조용히 종료.
+    process.exit(0);
+  }
 }
+
+module.exports = {
+  loadConfig,
+  analyze,
+  signals,
+  readTranscriptLines,
+  findLatestTranscript,
+  projectSlug,
+  EFFORT_SCALE,
+  pct,
+  k,
+};
