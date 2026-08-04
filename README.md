@@ -62,12 +62,12 @@ Claude/
 |---|---|---|
 | `SessionStart` 훅 | 세션 시작·재개·압축 직후 | 작업 카드 + 볼트 좌표 1회 주입 (이후 캐시에 얹혀 사실상 무료) |
 | `UserPromptSubmit` 훅 | 매 프롬프트 | **신호가 잡혔고 직전과 달라졌을 때만** 1~2줄 |
-| 스테이터스라인 | 상시 | 모델 / 캐시 적중 / 컨텍스트 / 절감액 / 절감 토큰 |
+| 스테이터스라인 **(선택)** | 켠 경우 상시 | 모델 / 캐시 적중 / 컨텍스트 / 절감액 / 절감 토큰 |
 | `lean` 스킬 | 모델이 필요할 때 | 전체 플레이북 |
 | `/lean` 커맨드 | 사용자 호출 | 세션 리포트 + 해석 3줄 |
 
 ```
-Opus 5 │ 🧠 96% │ ▮▮▯▯▯ ctx 427k/1M 43% │ 💰 $38.8 │ 🎫 8.2M saved │ ⚠ ctx-cost
+⚠ 1M ON · 🤖 claude-opus-5 · 🧠 Cache hit 96.7% · ⏳ Cache expires 59:47 · 📦 ▮▯▯▯▯ Ctx 136k/1M 13.6% · 💰 Cache saved $25.8 · 🎫 Tokens saved 5.4M · 68 turns
 ```
 
 절감액은 추정이 아니라 실단가 계산이다 — 캐시 read는 base input의 0.1배, write는 5m TTL 1.25배 /
@@ -94,17 +94,35 @@ Opus 5 │ 🧠 96% │ ▮▮▯▯▯ ctx 427k/1M 43% │ 💰 $38.8 │ 🎫 
 /plugin install lean@lean
 ```
 
-스테이터스라인은 플러그인이 아니라 `settings.json`에 직접 넣는다(한 세션에 하나만 가능).
+### 스테이터스라인 (선택 — 기본 꺼짐)
+
+플러그인을 설치해도 스테이터스라인은 **켜지지 않는다.** `settings.json`의 `statusLine`은
+프로필당 **하나만** 지정할 수 있어서, 플러그인이 임의로 차지하면 이미 쓰던 상태줄을 밀어내기
+때문이다. 쓰려면 직접 넣는다.
+
+먼저 설치 경로를 확인한다.
+
+```bash
+ls -t ~/.claude/plugins/cache/*/lean/*/scripts/statusline.js | head -1
+```
+
+나온 절대 경로를 `~/.claude/settings.json`에 넣는다.
 
 ```json
 {
   "statusLine": {
     "type": "command",
-    "command": "node \"<플러그인 경로>/scripts/statusline.js\"",
+    "command": "node \"<위에서 나온 경로>\"",
     "refreshInterval": 5
   }
 }
 ```
+
+**이미 다른 토큰 상태줄을 쓰고 있다면 택일이다.** lean 것은 *현재 세션*의 컨텍스트 게이지와
+신호를 보여주고, 레이트리밋 캡 잔량(5시간/7일 창)은 보여주지 않는다. 캡 관리가 더 급하면
+기존 상태줄을 유지하고 lean은 훅과 `/lean`만 쓰는 편이 낫다 — 둘은 서로 간섭하지 않는다.
+
+`NO_COLOR` 환경변수를 존중한다.
 
 팀 배포 시에는 마켓플레이스를 사내 표준 `settings.json`에 미리 넣어두면 각자 `/plugin install`만 하면 된다.
 
