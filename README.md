@@ -97,6 +97,22 @@ Claude/
 /plugin install lean@lean
 ```
 
+### SSH 키가 없다면
+
+위의 `owner/repo` 단축형은 **SSH로 clone**한다. SSH 키가 없는 환경(회사 PC 등)에서는
+전체 HTTPS URL을 쓰면 키 없이 설치된다.
+
+```
+/plugin marketplace add https://github.com/yunseok-map/claude-lean.git
+/plugin install lean@lean
+```
+
+단축형을 계속 쓰고 싶으면 `~/.claude/settings.json`에 아래를 넣고 재시작한다.
+
+```json
+{ "env": { "CLAUDE_CODE_PLUGIN_PREFER_HTTPS": "1" } }
+```
+
 ### 스테이터스라인 (선택 — 기본 꺼짐)
 
 플러그인을 설치해도 스테이터스라인은 **켜지지 않는다.** `settings.json`의 `statusLine`은
@@ -136,6 +152,13 @@ ls -t ~/.claude/plugins/cache/*/lean/*/scripts/statusline.js | head -1
   },
   "enabledPlugins": { "lean@lean": true }
 }
+```
+
+팀원 중에 SSH 키가 없는 사람이 있으면 `github` 대신 `git` + HTTPS URL로 적는다.
+그러면 모두가 키 없이 설치된다.
+
+```json
+"lean": { "source": { "source": "git", "url": "https://github.com/yunseok-map/claude-lean.git" } }
 ```
 
 ### 폐쇄망·사내 git
