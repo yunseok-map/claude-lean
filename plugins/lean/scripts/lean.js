@@ -36,8 +36,11 @@ const DEFAULTS = {
   // 점유율과 별개로, 이 크기를 넘으면 캐시 적중이어도 턴당 비용이 붙는다.
   // 1M 창에서는 55%(550k)까지 기다리면 이미 많이 쓴 뒤이므로 절대 기준이 필요하다.
   ctxCostFloor: 250000,
-  // 캐시 적중률이 이 아래로 떨어지면 컨텍스트가 흔들리고 있다는 뜻
+  // 캐시 적중률이 이 아래로 떨어지면 컨텍스트가 흔들리고 있다는 뜻.
+  // 판정은 누적이 아니라 최근 cacheWindowTurns턴의 이동창으로 한다 —
+  // 누적은 세션이 길수록 둔해져서, 지금 벌어지는 재생성을 놓친다.
   cacheHitFloor: 0.55,
+  cacheWindowTurns: 8,
   // 턴당 평균 출력 토큰 (effort에 따라 자동 보정된다 — EFFORT_SCALE 참고)
   outputHeavy: 1600,
   // 턴당 평균 컨텍스트 증가량
@@ -93,9 +96,8 @@ function projectSlug(cwd) {
   return cwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
-/** 훅 stdin 없이 호출됐을 때 현재 cwd의 최신 트랜스크립트를 찾는다. */
-function findLatestTranscript(cwd) {
-  const dir = path.join(os.homedir(), '.claude', 'projects', projectSlug(cwd));
+/** 디렉터리 안에서 가장 최근에 수정된 .jsonl. 없으면 null. */
+function newestJsonl(dir) {
   let entries;
   try {
     entries = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
@@ -116,7 +118,36 @@ function findLatestTranscript(cwd) {
       /* skip */
     }
   }
-  return best;
+  return best ? { file: best, mtime: bestMtime } : null;
+}
+
+/**
+ * 훅 stdin 없이 호출됐을 때 트랜스크립트를 찾는다.
+ *   1) cwd에 대응하는 프로젝트 디렉터리
+ *   2) 없으면 전체 프로젝트에서 가장 최근 것
+ *
+ * 2)가 필요한 이유: 셸의 cwd가 세션 프로젝트와 다를 수 있다(플러그인 폴더나
+ * 하위 디렉터리에서 실행하는 경우). 그때 조용히 실패하는 대신 최근 세션을 쓴다.
+ * 대체가 일어났으면 info.fallback에 표시해 호출자가 알릴 수 있게 한다.
+ */
+function findLatestTranscript(cwd, info) {
+  const root = path.join(os.homedir(), '.claude', 'projects');
+  const own = newestJsonl(path.join(root, projectSlug(cwd)));
+  if (own) return own.file;
+
+  let dirs;
+  try {
+    dirs = fs.readdirSync(root);
+  } catch (_) {
+    return null;
+  }
+  let best = null;
+  for (const d of dirs) {
+    const c = newestJsonl(path.join(root, d));
+    if (c && (!best || c.mtime > best.mtime)) best = c;
+  }
+  if (best && info) info.fallback = true;
+  return best ? best.file : null;
 }
 
 /** 트랜스크립트가 아주 클 때는 뒷부분만 읽는다. */
@@ -213,6 +244,7 @@ function analyze(lines) {
     sideTokens: 0,
     sideTurns: side.size,
     ctxSeries: [],
+    cacheSeries: [], // 턴별 [read, create] — 이동창 계산용
     ephemeral5m: 0,
     ephemeral1h: 0,
     effort: effort,
@@ -230,6 +262,7 @@ function analyze(lines) {
     m.out += u.output_tokens || 0;
     m.cacheRead += u.cache_read_input_tokens || 0;
     m.cacheCreate += u.cache_creation_input_tokens || 0;
+    m.cacheSeries.push([u.cache_read_input_tokens || 0, u.cache_creation_input_tokens || 0]);
     m.freshIn += u.input_tokens || 0;
     m.ctx = inTot; // 마지막 값이 현재 컨텍스트 크기
     m.ctxSeries.push(inTot);
@@ -281,6 +314,25 @@ function analyze(lines) {
 const EFFORT_SCALE = { low: 0.7, medium: 1, high: 1.9, xhigh: 2.6, max: 3.2 };
 
 /**
+ * 최근 n턴의 캐시 적중률(이동창).
+ *
+ * 누적 적중률은 세션이 길어질수록 분모가 커져서, 지금 막 시작된 재생성을
+ * 희석해 버린다. 판정은 이 창으로 하고 누적은 참고로만 보여준다.
+ * 토큰 가중이라 큰 턴이 그만큼 반영된다. 표본이 없으면 null.
+ */
+function recentCacheHit(m, n) {
+  const w = m.cacheSeries.slice(-Math.max(2, n || 8));
+  let read = 0;
+  let create = 0;
+  for (const [r, c] of w) {
+    read += r;
+    create += c;
+  }
+  if (read + create <= 0) return null;
+  return { hit: read / (read + create), turns: w.length };
+}
+
+/**
  * 지금 상황에서 실제로 행동을 바꿀 만한 것만 신호로 만든다.
  * 각 항목은 [key, 한 줄 조언].
  */
@@ -309,10 +361,11 @@ function signals(m, cfg) {
     ]);
   }
 
-  if (m.turns >= 4 && m.cacheHit < cfg.cacheHitFloor) {
+  const rc = recentCacheHit(m, cfg.cacheWindowTurns);
+  if (m.turns >= 4 && rc && rc.turns >= 4 && rc.hit < cfg.cacheHitFloor) {
     out.push([
       'cache-churn',
-      `캐시 적중 ${pct(m.cacheHit)}. 앞쪽 컨텍스트가 계속 재생성되고 있다 — 이미 읽은 것을 다시 끌어오지 말고 뒤에 덧붙이는 방향으로 진행해라.`,
+      `최근 ${rc.turns}턴 캐시 적중 ${pct(rc.hit)} (누적 ${pct(m.cacheHit)}). 앞쪽 컨텍스트가 계속 재생성되고 있다 — 이미 읽은 것을 다시 끌어오지 말고 뒤에 덧붙이는 방향으로 진행해라.`,
     ]);
   }
 
@@ -485,7 +538,8 @@ function main() {
 
   if (MODE === 'report') {
     const cwd = arg('--cwd') || process.cwd();
-    const file = arg('--transcript') || findLatestTranscript(cwd);
+    const info = {};
+    const file = arg('--transcript') || findLatestTranscript(cwd, info);
     if (!file || !fs.existsSync(file)) {
       console.log('lean: 트랜스크립트를 찾지 못했습니다.');
       return;
@@ -496,9 +550,15 @@ function main() {
     const sig = signals(m, cfg);
     const ratio = m.ctx / cfg.contextLimit;
     console.log('=== lean report ===');
+    if (info.fallback) {
+      console.log(`(cwd에 세션 기록이 없어 최근 세션으로 대체: ${path.basename(file)})`);
+    }
     console.log(`턴 수            : ${m.turns}${partial ? ' (일부 구간만 분석)' : ''}`);
     console.log(`현재 컨텍스트    : ${k(m.ctx)} / ${k(cfg.contextLimit)} (${pct(ratio)})`);
-    console.log(`캐시 적중률      : ${pct(m.cacheHit)}  (read ${k(m.cacheRead)} / create ${k(m.cacheCreate)})`);
+    const rc = recentCacheHit(m, cfg.cacheWindowTurns);
+    console.log(
+      `캐시 적중률      : 최근 ${rc ? rc.turns : 0}턴 ${rc ? pct(rc.hit) : '-'} / 누적 ${pct(m.cacheHit)}  (read ${k(m.cacheRead)} / create ${k(m.cacheCreate)})`
+    );
     console.log(`캐시 TTL 분포    : 1h ${k(m.ephemeral1h)} / 5m ${k(m.ephemeral5m)}`);
     console.log(
       `누적 출력        : ${k(m.out)}  (턴당 ${Math.round(m.avgOut)}, effort=${m.effort || '?'}, 기준 ${Math.round(cfg.outputHeavy * (EFFORT_SCALE[m.effort] || 1))})`
@@ -598,6 +658,7 @@ module.exports = {
   loadConfig,
   analyze,
   signals,
+  recentCacheHit,
   resolveContextLimit,
   STD_LIMIT,
   BIG_LIMIT,
