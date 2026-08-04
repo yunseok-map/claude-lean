@@ -93,25 +93,33 @@ Claude/
 ## 설치
 
 ```
-/plugin marketplace add yunseok-map/claude-lean
-/plugin install lean@lean
-```
-
-### SSH 키가 없다면
-
-위의 `owner/repo` 단축형은 **SSH로 clone**한다. SSH 키가 없는 환경(회사 PC 등)에서는
-전체 HTTPS URL을 쓰면 키 없이 설치된다.
-
-```
 /plugin marketplace add https://github.com/yunseok-map/claude-lean.git
 /plugin install lean@lean
 ```
 
-단축형을 계속 쓰고 싶으면 `~/.claude/settings.json`에 아래를 넣고 재시작한다.
+HTTPS URL은 **SSH 키 없이 동작한다.** 회사 PC처럼 키를 만들 수 없는 환경에서도 그대로 쓴다.
+
+### owner/repo 단축형
+
+```
+/plugin marketplace add yunseok-map/claude-lean
+```
+
+짧지만 이 형태는 **SSH로 clone**하므로 SSH 키가 있어야 한다.
+키 없이 단축형을 쓰려면 `~/.claude/settings.json`에 아래를 넣고 Claude Code를 재시작한다.
+(`env`는 프로세스 시작 시 읽히므로 `/reload-plugins`로는 반영되지 않는다.)
 
 ```json
 { "env": { "CLAUDE_CODE_PLUGIN_PREFER_HTTPS": "1" } }
 ```
+
+### 업데이트
+
+```
+/plugin marketplace update lean
+```
+
+플러그인 파일만 고쳤을 때는 `/reload-plugins`로 충분하다.
 
 ### 스테이터스라인 (선택 — 기본 꺼짐)
 
