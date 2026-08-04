@@ -78,7 +78,9 @@ Opus 5 │ 🧠 96% │ ▮▮▯▯▯ ctx 427k/1M 43% │ 💰 $38.8 │ 🎫 
 
 - `ctx-cost` — 컨텍스트 250k 초과. **1M 창에서 특히 중요**: 점유율은 낮아도 그 크기가 매 턴 다시 계산된다
 - `ctx-warn` / `ctx-high` — 점유율 55% / 75%
-- `cache-churn` — 캐시 적중률 55% 미만 (앞쪽 컨텍스트가 재생성되는 중)
+- `cache-churn` — **최근 8턴 이동창** 캐시 적중률 55% 미만 (앞쪽 컨텍스트가 재생성되는 중).
+  누적이 아니라 이동창인 이유: 누적은 세션이 길수록 둔해져 지금 막 시작된 재생성을 놓친다.
+  반대로 `/compact` 직후의 1회성 재생성은 창 안의 정상 턴이 받쳐줘 오탐이 되지 않는다
 - `verbose` — 턴당 출력 과다. **effort에 따라 임계치 자동 보정** (thinking이 output에 포함되므로)
 - `growth` — 턴당 컨텍스트 증가량 과다
 - `subagent` — 서브에이전트 토큰 비중 30% 초과
@@ -88,7 +90,7 @@ Opus 5 │ 🧠 96% │ ▮▮▯▯▯ ctx 427k/1M 43% │ 💰 $38.8 │ 🎫 
 ## 설치
 
 ```
-/plugin marketplace add <조직>/claude-lean
+/plugin marketplace add yunseok-map/claude-lean
 /plugin install lean@lean
 ```
 
@@ -109,10 +111,31 @@ Opus 5 │ 🧠 96% │ ▮▮▯▯▯ ctx 427k/1M 43% │ 💰 $38.8 │ 🎫 
 ```json
 {
   "extraKnownMarketplaces": {
-    "lean": { "source": { "source": "github", "repo": "<조직>/claude-lean" } }
-  }
+    "lean": { "source": { "source": "github", "repo": "yunseok-map/claude-lean" } }
+  },
+  "enabledPlugins": { "lean@lean": true }
 }
 ```
+
+### 폐쇄망·사내 git
+
+`/plugin marketplace add`는 git clone이므로 외부망이 막힌 환경에서는 공개 리포를 그대로 쓸 수 없다.
+사내 git에 미러한 뒤 URL을 바꿔 지정한다.
+
+```json
+{
+  "extraKnownMarketplaces": {
+    "lean": { "source": { "source": "git", "url": "https://git.사내/팀/claude-lean.git" } }
+  },
+  "enabledPlugins": { "lean@lean": true }
+}
+```
+
+git 자체가 막혀 있다면 컨테이너 이미지에 미리 심는 방법을 쓴다 —
+설치를 한 번 마친 `~/.claude/plugins`를 이미지에 복사하고 `CLAUDE_CODE_PLUGIN_SEED_DIR`로 가리키면
+런타임에 클론 없이 시작한다.
+
+플러그인 자체는 네트워크를 전혀 쓰지 않는다(로컬 트랜스크립트만 읽는다). 설치 경로만 해결하면 폐쇄망에서 그대로 동작한다.
 
 ## 설정
 
@@ -125,6 +148,7 @@ Opus 5 │ 🧠 96% │ ▮▮▯▯▯ ctx 427k/1M 43% │ 💰 $38.8 │ 🎫 
   "ctxHigh": 0.75,
   "ctxCostFloor": 250000,
   "cacheHitFloor": 0.55,
+  "cacheWindowTurns": 8,
   "outputHeavy": 1600,
   "ctxGrowthHeavy": 14000,
   "sidechainShare": 0.3,
